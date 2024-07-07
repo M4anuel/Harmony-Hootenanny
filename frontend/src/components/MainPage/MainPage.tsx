@@ -5,6 +5,7 @@ import MainWindow from './MainWindow'
 import SongQueue from './SongQueue'
 import Cookies from 'js-cookie'
 import socket from '../../socket'
+import DashBoard from '../DashBoard'
 
 interface MainPageProps {
   roomId: number;
@@ -88,18 +89,27 @@ const MainPage: React.FC<MainPageProps> = ({ roomId }) => {
       socket.disconnect();
     };
   }, [roomId]); // This effect runs whenever roomId changes
-  
-  const skip = () =>{
-    socket.connect()
-    socket.emit("skip_song", roomId);
-  }
-  const play = () =>{
-    socket.connect()
+
+  const skip = () => {
+    socket.connect();
+    //@ts-ignore
+    socket.emit("skip_song", roomId, userData.username);
+  };
+  const play = () => {
+    socket.connect();
     socket.emit("play_song", roomId);
-  }
-  const pause = () =>{
-    socket.connect()
+  };
+  const pause = () => {
+    socket.connect();
     socket.emit("pause_song", roomId);
+  };
+  const select_song = (new_song: string) =>{
+    socket.connect();
+    socket.emit("select_song", new_song, roomId);
+  }
+  const download_song = (url: string) =>{
+    socket.connect();
+    socket.emit("download_song", url, roomId);
   }
   return (
     <>
@@ -110,22 +120,37 @@ const MainPage: React.FC<MainPageProps> = ({ roomId }) => {
           justifyContent: "space-around"
         }}
       >
-        <Box sx={{ flexGrow: 1 }}>
+        <Box>
           <Rooms></Rooms>
         </Box>
         <Divider orientation="vertical" />
-        <Box sx={{ flexGrow: 7, height: "100%" }}>      
-        {//@ts-ignore
-          <MainWindow currentlyPlaying={filename} activeUsers={activeUsers} skip={skip} play={play} pause={pause} song={song}></MainWindow>
-        }
+        <Box sx={{ flexGrow: 7, height: "100%" }}>
+          {//@ts-ignore
+            roomId > 0 ? <MainWindow 
+            currentlyPlaying={filename} 
+            activeUsers={activeUsers} 
+            skip={skip} 
+            play={play} 
+            pause={pause} 
+            onSongSelect={select_song}
+            onSongDownload={download_song}
+            //@ts-ignore
+            song={song} 
+            >  
+            </MainWindow> :
+              <DashBoard />
+          }
         </Box>
 
-        <Divider orientation="vertical" />
-        <Box sx={{ flexGrow: 1 }}>
-          {
-            // @ts-ignore
-            <SongQueue queue={queue}></SongQueue>}
-        </Box>
+        {roomId > 0 ? <>
+          <Divider orientation="vertical" />
+          <Box sx={{ flexGrow: 1 }}>
+            {
+              // @ts-ignore
+              <SongQueue queue={queue}></SongQueue>}
+          </Box>
+        </> : <></>
+        }
       </Box >
     </>
   )
@@ -139,4 +164,7 @@ export function MainPage2() {
 }
 export function MainPage3() {
   return <MainPage roomId={3} />;
+}
+export function Dashboard() {
+  return <MainPage roomId={0} />;
 }

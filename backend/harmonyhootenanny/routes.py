@@ -1,10 +1,13 @@
 """handles Rest-API of our backend"""
 # Import necessary modules
+import json
 import os
 import sqlite3
+import re
 from flask import Blueprint, request, jsonify, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
-from database import get_db_connection
+from harmonyhootenanny.events import add_to_scheduler_queue, get_or_create_scheduler
+from database import add_song_to_db_queue, get_db_connection, get_user_id
 from harmonyhootenanny.modules.youtubedownloader import YoutubeDownloader
 
 
@@ -226,84 +229,201 @@ def stream_mp3(filename):
 @main.route('/api/search', methods=['GET'])
 def search_songs():
     """
-    Search for MP3 files based on a query.
+    Search for songs based on a query string.
 
-    This endpoint allows users to search for MP3 files in the server's song directory.
-    It returns a list of file names that contain the search term.
+    This function handles GET requests to the '/api/search' endpoint. It retrieves song titles and artists 
+    from the database that match the provided query string, constructs suggestions in the format 'title - artist',
+    and returns them as JSON.
 
     Query Parameters:
-        q (str): The search term used to find matching MP3 files. 
-        Defaults to an empty string if not provided.
+        q (str): The search term used to find matching song titles. Defaults to an empty string if not provided.
 
     Responses:
         200: Successfully retrieved search suggestions.
+            Returns a JSON object containing a list of suggestions, where each suggestion is in the format 'title - artist'.
         {
             "suggestions": [
-                {"title": "filename1.mp3"},
-                {"title": "filename2.mp3"},
+                {"title": "Song Title - Artist"},
+                {"title": "Another Title - Another Artist"},
                 ...
             ]
         }
+        500: Database error.
+            Returns a JSON object with an error message if there is an issue with the database connection or query execution.
+        {
+            "error": "Database error: <error_message>"
+        }
 
     Returns:
-        Response object with a JSON message containing a list of matching MP3 file names.
+        Response object with a JSON message containing a list of search suggestions and an appropriate HTTP status code.
     """
     query = request.args.get('q', '')
-    # Retrieve search term from the query string; default to empty string if not provided
-    mp3_directory = './songs/'
     suggestions = []
-     # Iterate over all files in the directory and check if their name contains the search term
-    for filename in os.listdir(mp3_directory):
-        if query.lower() in filename.lower() and filename.endswith('.mp3'):
-            suggestions.append({'title': filename})
-    # Return the list of suggestions as a JSON response
+
+    try:
+        with get_db_connection() as db:
+            cursor = db.cursor()
+            cursor.execute("SELECT title, artist FROM songs WHERE title LIKE ?", ('%' + query + '%',))
+            results = cursor.fetchall()
+            
+            for row in results:
+                suggestions.append({'title': f"{row['title']} - {row['artist']}"})
+
+    except sqlite3.Error as e:
+        return jsonify({'error': f"Database error: {str(e)}"}), 500
+
     return jsonify({'suggestions': suggestions})
 
 @main.route('/api/download/youtube', methods=['POST'])
-def download_youtube():
+def searchbar():
     """
-    Download a YouTube video as an MP3.
+    Search for a YouTube song and add it to the queue if found.
 
-    This endpoint allows users to download the audio of a YouTube video as an MP3 file.
-    The YouTube link is provided in the request body.
+    This function handles POST requests to the '/api/download/youtube' endpoint. It receives a JSON object
+    containing a search value (YouTube link or song title), extracts the room ID and user ID from the user data,
+    checks if the search value is a valid YouTube link, and downloads the video if so. If the search value is not
+    a YouTube link, it returns a message indicating that. If the video is successfully downloaded, it adds the song
+    to the queue and returns a success message.
 
     Request JSON format:
     {
-        "youtube_link": "string"
+        "searchvalue": "string",
+        "userData": {
+            "room_Id": "int",
+            "user_Id": "int"
+        }
     }
 
     Responses:
-        200: Video downloaded successfully.
+        200: Successfully found and added the YouTube song to the queue.
+            Returns a JSON object with a success message and the title of the downloaded song.
         {
-            "message": "Video downloaded successfully",
-            "mp3_path": "path/to/downloaded/file.mp3"
+            "message": "Youtube song successfully found",
+            "title": "string"
         }
-        400: No YouTube link provided.
+        404: Failed to download the video.
+            Returns a JSON object with an error message.
         {
-            "error": "No YouTube link provided"
-        }
-        500: Failed to download video or other errors.
-        {
-            "error": "Failed to download video" | "<error_message>"
+            "error": "Failed to download video"
         }
 
     Returns:
-        Response object with a JSON message and appropriate HTTP status code.
+        Response object with a JSON message and an appropriate HTTP status code.
     """
-    youtube_link = request.json.get('youtube_link')
-    print(f"Received YouTube link: {youtube_link}")  # Ausgabe des Links in der Konsole
-    if not youtube_link:
-        return jsonify({'error': 'No YouTube link provided'}), 400
+    data = request.json
+    search_value = data.get('searchvalue')
+    print("Link: ",search_value)
+    userdata = data.get('userData')
+    username=userdata['username']
 
-    # Initialize the YoutubeDownloader
-    youtube_downloader = YoutubeDownloader()
-    mp3_path = youtube_downloader.download_video(youtube_link)
-    if mp3_path[1]==200:
-        return jsonify({'message': 'Video downloaded successfully', 'mp3_path': mp3_path}), 200
-    return jsonify({'error': 'Failed to download video'}), 500
+    room_id = data.get('roomId')
+    user_id = get_user_id(username)
 
+    # Check if it is a Youtube link
+    youtube_regex = r'^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$'
+    
+    if re.match(youtube_regex, search_value):
+        # Initialize the YoutubeDownloader only, if it is a Youtube link
+        youtube_downloader = YoutubeDownloader()
+        song_id, status_code = youtube_downloader.download_video(search_value)
+        if status_code == 200:
+            # Ensure the scheduler is initialized
+            get_or_create_scheduler(room_id)
+            # Add the song to the queue in songSchedular
+            add_to_scheduler_queue(room_id, song_id)
+            # Add Song to queue in database
+            add_song_to_db_queue(song_id, room_id, user_id)
+            return jsonify({'message': 'Youtube song successfully found'}), 200
+        return jsonify({'error': 'Failed to download video'}), status_code
+    else:
+        # Return a message indicating that it was not a YouTube link
+        return jsonify({'message': 'Not a YouTube link'}), 200
+
+@main.route('/api/selected-song', methods=['POST'])
+def handle_selected_song():
+    """
+    Handle a selected song and add it to the queue if found in the database.
+
+    This function handles POST requests to the '/api/selected-song' endpoint. It receives a JSON object
+    containing the selected song title, extracts the room ID and user ID from the user data, splits the
+    title into title and artist, and searches the database for a matching song. If the song is found, it
+    adds it to the queue and returns a success message with the song ID. If the song is not found or the
+    input is invalid, it returns an error message.
+
+    Request JSON format:
+    {
+        "selectedSong": "string",
+        "userData": {
+            "room_Id": "int",
+            "user_Id": "int"
+        }
+    }
+
+    Responses:
+        200: Successfully found and added the selected song to the queue.
+            Returns a JSON object with a success message and the ID of the found song.
+        {
+            "message": "Selected song found and added to queue",
+            "songId": "int"
+        }
+        404: Song not found in the database.
+            Returns a JSON object with an error message.
+        {
+            "error": "Song not found"
+        }
+        400: Invalid input or format of the selected song.
+            Returns a JSON object with an error message.
+        {
+            "error": "Invalid input" | "Invalid format of selected song"
+        }
+
+    Returns:
+        Response object with a JSON message and an appropriate HTTP status code.
+    """
+    data = request.json
+    selected_song = data.get('selectedSong')
+    userdata = data.get('userData')
+    username=userdata['username']
+
+    room_id = data.get('roomId')
+    user_id = get_user_id(username)
+
+    if selected_song:
+        try:
+            # Split the selected song into title and artist
+            title, artist = selected_song.rsplit(' - ', 1)
+            with get_db_connection() as db:
+                cursor = db.cursor()
+                cursor.execute("SELECT song_id FROM songs WHERE title = ? AND artist = ?", (title, artist))
+                result = cursor.fetchone()
+
+                if result:
+                    song_id = result['song_id']
+                   # Ensure the scheduler is initialized
+                    get_or_create_scheduler(room_id)
+                    # Add the song to the queue in songSchedular
+                    add_to_scheduler_queue(room_id, song_id)
+                    # Add Song to queue in database
+                    add_song_to_db_queue(song_id, room_id, user_id)
+                    return jsonify({'message': 'Selected song found and added to queue', 'songId': song_id}), 200
+                else:
+                    return jsonify({'error': 'Song not found'}), 404
+
+        except sqlite3.Error as e:
+            return jsonify({'error': f"Database error: {str(e)}"}), 500
+        except ValueError:
+            return jsonify({'error': 'Invalid format of selected song'}), 400
+
+    else:
+        return jsonify({'error': 'Invalid input'}), 400
+
+#  Creates three rooms in the database if they don't exist already.
 def create_rooms():
-    """Create predefined rooms in the database if they don't exist."""
+    """
+    Create predefined rooms in the database if they don't exist.
+    This function connects to the database, checks if the rooms with ids 1, 2, and 3 exist,
+    and if they don't, it creates them. This function is called when the application starts.
+    """
     room_ids = [1, 2, 3]
 
     with get_db_connection() as conn:
@@ -319,3 +439,40 @@ def create_rooms():
 
 # Call the function when the application starts
 create_rooms()
+
+# Endpoint to get the dashboard data
+@main.route('/api/dashboard', methods=['GET'])
+def get_dashboard():
+    """
+    - This functions connects to the database and retrieves the top 3 artists for each room.
+    - It returns the data in JSON format.
+    
+    """
+    try:
+        def get_stats(cursor, query, room_id):
+            cursor.execute(query, (room_id,))
+            rows = cursor.fetchall()
+            return [{description[0]: value for description, value in zip(cursor.description, row)} for row in rows]
+
+    
+        with get_db_connection() as db:
+            cursor = db.cursor()
+            room_data = {}
+            for room_id in [1, 2, 3]:
+                 room_data[f'room{room_id}'] ={
+    
+                    'top_artist': get_stats(cursor, """
+                               SELECT artist, COUNT(*) as count
+                                FROM songs JOIN queues on songs.song_id = queues.song_id
+                                WHERE queues.room_id=?
+                                GROUP BY artist
+                                ORDER BY count DESC
+                                Limit 3
+                                """, room_id),
+                     
+                }
+
+        return jsonify(room_data), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500

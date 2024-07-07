@@ -4,7 +4,7 @@ import threading
 import time
 from ..extensions import socketio
 from flask_socketio import emit
-from database import get_queue, get_song
+from database import get_song_by_id, get_queue
 
 class _Song:
     """
@@ -42,7 +42,7 @@ class _Song:
         }
 
 
-default_song = _Song("test.mp3", "No Songs added yet", "Me, Myself & I", 5)
+default_song = _Song("default_music.mp3", "Kahoot / Harmony Hootenanny Lobby Music", "Add a song above to stop listening to this ", 64)
 
 
 
@@ -81,9 +81,9 @@ class SongScheduler:
     """
     def __init__(self, room_id: int, socketio) -> None:
         example_queue = [
-            _Song("Hypnotized.mp3", "Hypnotized", "Someone1", 195),
+            _Song("Hypnotized.mp3", "Hypnotized", "Purple Disco Machine", 195),
             _Song("Men At Work - Down Under (Official HD Video).mp3", "Down Under", "Men At Work", 220),
-            _Song("Bob Marley - One Love.mp3","One Love", "Bob MArley", 164)
+            _Song("Bob Marley - One Love.mp3","One Love", "Bob Marley", 164)
             ]
         self.room_id = room_id
         self.socketio = socketio
@@ -112,12 +112,14 @@ class SongScheduler:
                     self.socketio.emit("currently_playing", self.get_current_song(), room=self.room_id)
                 else:
                     self.skip()
-
             time.sleep(self.check_interval)
                 
     def skip(self) -> None:
         """Skips to the next song in the queue."""
-        next_song: _Song = self.queue.pop(0)
+        try:
+            next_song: _Song = self.queue.pop(0)
+        except Exception as e:
+            next_song: _Song = default_song
         self.timeout = 0
         self.playing = True
         self.current_song = next_song
@@ -141,9 +143,11 @@ class SongScheduler:
 
     def add_to_queue(self, song_id: int) -> None:
         """Adds a song to the queue based on its ID."""
-        song_props = get_song(song_id)
-        new_song = _Song(song_props[0], song_props[1], song_props[2], song_props[3])
+        song_props = get_song_by_id(song_id)
+        #     def __init__(self, src: str, title: str, artist: str, duration: int) -> None:
+        new_song = _Song(song_props["src"], song_props["title"], song_props["artist"],  song_props["duration"])
         self.queue.append(new_song)
+        self.socketio.emit("song_queue", {"queue": self.get_queue()}, room=self.room_id)
     
     def get_queue(self) -> list[dict]:
         """Returns a list of dictionaries representing songs in the queue."""
